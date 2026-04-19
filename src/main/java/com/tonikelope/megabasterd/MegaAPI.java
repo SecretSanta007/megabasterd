@@ -1086,7 +1086,6 @@ public class MegaAPI implements Serializable {
     public HashMap<String, Object> getFolderNodes(String folder_id, String folder_key, JProgressBar bar, boolean cache) throws Exception {
 
         HashMap<String, Object> folder_nodes = null;
-
         String res = null;
 
         if (cache) {
@@ -1094,11 +1093,8 @@ public class MegaAPI implements Serializable {
         }
 
         if (res == null) {
-
             String request = "[{\"a\":\"f\", \"c\":\"1\", \"r\":\"1\", \"ca\":\"1\"}]";
-
             URL url_api = new URL(API_URL + "/cs?id=" + String.valueOf(_seqno) + "&n=" + folder_id);
-
             res = RAW_REQUEST(request, url_api);
 
             if (res != null) {
@@ -1109,11 +1105,8 @@ public class MegaAPI implements Serializable {
         LOG.log(Level.INFO, "MEGA FOLDER {0} JSON FILE TREE SIZE -> {1}", new Object[]{folder_id, MiscTools.formatBytes((long) res.length())});
 
         if (res != null) {
-
             ObjectMapper objectMapper = new ObjectMapper();
-
             HashMap[] res_map = objectMapper.readValue(res, HashMap[].class);
-
             folder_nodes = new HashMap<>();
 
             int s = ((List) res_map[0].get("f")).size();
@@ -1125,75 +1118,87 @@ public class MegaAPI implements Serializable {
                     bar.setValue(0);
                 });
             }
+            
             int conta_nodo = 0;
 
             for (Object o : (Iterable<? extends Object>) res_map[0].get("f")) {
-
                 conta_nodo++;
-
                 int c = conta_nodo;
 
                 if (bar != null) {
                     MiscTools.GUIRun(() -> {
-
                         bar.setValue(c);
                     });
                 }
 
                 HashMap<String, Object> node = (HashMap<String, Object>) o;
+                
+                // --- YELLOWSTONE FIX START ---
+                String full_k = (String) node.get("k");
+                if (full_k == null || full_k.isEmpty()) continue;
 
-                String[] node_k = ((String) node.get("k")).split(":");
+                String[] segments = full_k.split("/");
+                String valid_dec_node_k = null;
+                HashMap valid_at = null;
 
-                if (node_k.length == 2 && node_k[0] != "" && node_k[1] != "") {
+                // Probamos cada segmento (MEGA puede enviar varias llaves si hay carpetas compartidas)
+                for (String segment : segments) {
+                    String[] node_k_parts = segment.split(":");
+                    
+                    // Si el segmento tiene el formato ID:KEY, extraemos la KEY (la última parte)
+                    if (node_k_parts.length >= 2) {
+                        String potential_k_b64 = node_k_parts[node_k_parts.length - 1];
 
-                    try {
+                        try {
+                            // Intentamos desencriptar la llave del nodo con la llave de la carpeta
+                            byte[] decodedFolderKey = _urlBase64KeyDecode(folder_key);
+                            byte[] nodeKeyBin = UrlBASE642Bin(potential_k_b64);
+                            byte[] decryptedKeyBin = decryptKey(nodeKeyBin, decodedFolderKey);
+                            String dec_node_k = Bin2UrlBASE64(decryptedKeyBin);
 
-                        String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(node_k[1]), _urlBase64KeyDecode(folder_key)));
+                            // Intentamos desencriptar los atributos (nombre del archivo)
+                            HashMap at = _decAttr((String) node.get("a"), _urlBase64KeyDecode(dec_node_k));
 
-                        HashMap at = _decAttr((String) node.get("a"), _urlBase64KeyDecode(dec_node_k));
-
-                        HashMap<String, Object> the_node = new HashMap<>();
-
-                        the_node.put("type", node.get("t"));
-
-                        the_node.put("parent", node.get("p"));
-
-                        the_node.put("key", dec_node_k);
-
-                        if (node.get("s") != null) {
-
-                            if (node.get("s") instanceof Integer) {
-
-                                long size = ((Number) node.get("s")).longValue();
-                                the_node.put("size", size);
-
-                            } else if (node.get("s") instanceof Long) {
-
-                                long size = (Long) node.get("s");
-                                the_node.put("size", size);
+                            if (at != null && at.get("n") != null) {
+                                valid_dec_node_k = dec_node_k;
+                                valid_at = at;
+                                break; // ¡Éxito! Hemos encontrado la llave que funciona
                             }
-                        } else {
-                            the_node.put("size", 0L);
+                        } catch (Exception e) {
+                            // Si falla este segmento, probamos el siguiente
                         }
-
-                        the_node.put("name", at.get("n"));
-
-                        the_node.put("h", node.get("h"));
-
-                        folder_nodes.put((String) node.get("h"), the_node);
-
-                    } catch (Exception e) {
-                        LOG.log(Level.WARNING, "WARNING: node key is not valid " + (String) node.get("k") + " " + folder_key);
                     }
-
-                } else {
-                    LOG.log(Level.WARNING, "WARNING: node key is not valid " + (String) node.get("k") + " " + folder_key);
                 }
 
+                if (valid_at != null) {
+                    HashMap<String, Object> the_node = new HashMap<>();
+                    the_node.put("type", node.get("t"));
+                    the_node.put("parent", node.get("p"));
+                    the_node.put("key", valid_dec_node_k);
+
+                    if (node.get("s") != null) {
+                        if (node.get("s") instanceof Integer) {
+                            long size = ((Number) node.get("s")).longValue();
+                            the_node.put("size", size);
+                        } else if (node.get("s") instanceof Long) {
+                            long size = (Long) node.get("s");
+                            the_node.put("size", size);
+                        }
+                    } else {
+                        the_node.put("size", 0L);
+                    }
+
+                    the_node.put("name", valid_at.get("n"));
+                    the_node.put("h", node.get("h"));
+
+                    folder_nodes.put((String) node.get("h"), the_node);
+                } else {
+                    LOG.log(Level.WARNING, "WARNING: Could not decrypt node key for handle " + (String) node.get("h"));
+                }
+                // --- YELLOWSTONE FIX END ---
             }
 
         } else {
-
             throw new Exception();
         }
 
